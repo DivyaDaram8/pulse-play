@@ -9,6 +9,7 @@ const videoSchema = new mongoose.Schema({
   status: { type: String, enum: ["uploaded","processing","safe","flagged","ready","error"], default: "uploaded" },
   processingProgress: { type: Number, default: 0 },
   result: { type: Object, default: {} }, // store fake analysis results or real meta
+  tenantId: { type: String, default: null },
 }, { timestamps: true });
 
 module.exports = mongoose.model("Video", videoSchema);

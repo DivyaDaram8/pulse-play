@@ -7,6 +7,7 @@ const auth = require("./middleware/auth");
 const roles = require("./middleware/roles");
 const authController = require("./controllers/authController");
 const videoController = require("./controllers/videoController");
+const adminController = require("./controllers/adminController");
 
 const app = express();
 
@@ -40,5 +41,14 @@ app.get("/api/videos/stream/:id", auth, videoController.streamVideo);
 /*
 app.use("/uploads", express.static(UPLOAD_DIR));
 */
+
+
+
+// Admin-only
+app.post("/api/admin/users", auth, roles(["admin"]), adminController.createUser);
+app.get("/api/admin/users", auth, roles(["admin"]), adminController.listUsers);
+app.put("/api/admin/users/:id/role", auth, roles(["admin"]), adminController.updateUserRole);
+app.get("/api/admin/videos", auth, roles(["admin"]), adminController.listAllVideos);
+
 
 module.exports = app;
