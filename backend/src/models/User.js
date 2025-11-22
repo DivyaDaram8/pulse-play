@@ -1,26 +1,25 @@
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
+// src/models/User.js
+const mongoose = require('mongoose');
 
-const userSchema = new mongoose.Schema({
-  name: String,
-  email: { type: String, unique: true, required: true },
-  password: { type: String, required: true },
-  role: { type: String, enum: ["viewer", "editor", "admin"], default: "viewer" },
-  socketId: { type: String },
-  tenantId: { type: String, default: null },
-  createdByAdmin: { type: Boolean, default: false }
-}, { timestamps: true });
-
-
-userSchema.pre("save", async function(next) {
-  if (!this.isModified("password")) return next();
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
-  next();
+const UserSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  passwordHash: { type: String, required: true },
+  role: { 
+    type: String, 
+    enum: ['superadmin', 'tenant_admin', 'editor', 'viewer'], 
+    default: 'viewer' 
+  },
+  tenantId: { type: mongoose.Schema.Types.ObjectId, ref: 'Tenant', required: false }, // null for superadmin
+  createdAt: { type: Date, default: Date.now }
 });
 
-userSchema.methods.comparePassword = function(candidate) {
-  return bcrypt.compare(candidate, this.password);
-};
+// Hide sensitive fields when converting to JSON
+UserSchema.set('toJSON', {
+  transform: (doc, ret) => {
+    delete ret.passwordHash;
+    return ret;
+  }
+});
 
-module.exports = mongoose.model("User", userSchema);
+module.exports = mongoose.model('User', UserSchema);

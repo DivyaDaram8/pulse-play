@@ -1,88 +1,92 @@
-const fs = require("fs");
-const path = require("path");
 const Video = require("../models/Video");
-const mockProcessor = require("../utils/mockProcessor");
+const fs = require('fs');
+const path = require('path');
+const { fakeProcess } = require('../utils/sensitivityProcessor');
 
-exports.uploadVideo = async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ message: "No file" });
-    const v = new Video({
-      userId: req.user._id,
-      filename: req.file.filename,
-      originalName: req.file.originalname,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      status: "uploaded"
+// upload single video (multer handles saving)
+exports.upload = async (req, res) => {
+  // req.file from multer
+  if (!req.file) return res.status(400).json({ message: 'No file' });
+  const { title } = req.body;
+  const vid = await Video.create({
+    title: title || req.file.originalname,
+    filename: req.file.filename,
+    originalName: req.file.originalname,
+    mimeType: req.file.mimetype,
+    size: req.file.size,
+    uploader: req.user._id,
+    tenantId: req.user.tenantId || null,
+    status: 'processing'
+  });
+
+  // Emit initial via socket (server will accept socket.io)
+  const io = req.app.get('io');
+  const room = `user:${req.user._id}`;
+  io.to(room).emit('video:upload:started', { videoId: vid._id, title: vid.title });
+
+  // start fake processing asynchronously (no blocking)
+  (async () => {
+    try {
+      const filePath = path.join(process.env.UPLOAD_DIR || './uploads', req.file.filename);
+      // fakeProcess accepts onProgress callback
+      const result = await fakeProcess(filePath, (progress) => {
+        // update clients
+        io.to(room).emit('video:processing:progress', { videoId: vid._id, progress });
+      });
+      vid.sensitivity = { label: result.label, score: result.score };
+      vid.status = 'processed';
+      await vid.save();
+      io.to(room).emit('video:processing:complete', { videoId: vid._id, label: result.label, score: result.score });
+    } catch (err) {
+      vid.status = 'failed';
+      await vid.save();
+      io.to(room).emit('video:processing:failed', { videoId: vid._id, error: err.message });
+    }
+  })();
+
+  res.json({ video: vid });
+};
+
+// list videos for tenant
+exports.list = async (req, res) => {
+  const tenantId = req.user.role === 'superadmin' ? req.query.tenantId : req.user.tenantId;
+  const filter = { tenantId };
+  if (req.query.status) filter.status = req.query.status;
+  const videos = await Video.find(filter).sort({ createdAt: -1 });
+  res.json({ videos });
+};
+
+// streaming with range support
+exports.stream = async (req, res) => {
+  const videoId = req.params.id;
+  const video = await Video.findById(videoId);
+  if (!video) return res.status(404).json({ message: 'Not found' });
+  // tenant enforcement
+  if (req.user.role !== 'superadmin' && video.tenantId.toString() !== req.user.tenantId.toString()) {
+    return res.status(403).json({ message: 'Tenant mismatch' });
+  }
+  const filePath = path.join(process.env.UPLOAD_DIR || './uploads', video.filename);
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const chunkSize = (end - start) + 1;
+    const file = fs.createReadStream(filePath, { start, end });
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunkSize,
+      'Content-Type': video.mimeType
     });
-    await v.save();
-
-    // Start mock processing (emits socket events)
-    mockProcessor.startProcessing(v, req.app.get("io"));
-
-    res.json({ message: "Uploaded", video: v });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-exports.listVideos = async (req, res) => {
-  try {
-    const videos = await Video.find({ userId: req.user._id }).sort({ createdAt: -1 });
-    res.json(videos);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-exports.getVideo = async (req, res) => {
-  try {
-    const v = await Video.findById(req.params.id);
-    if (!v) return res.status(404).json({ message: "Not found" });
-    if (!v.userId.equals(req.user._id) && req.user.role === "viewer") {
-      return res.status(403).json({ message: "Forbidden" });
-    }
-    res.json(v);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-
-exports.streamVideo = async (req, res) => {
-  try {
-    const v = await Video.findById(req.params.id);
-    if (!v) return res.status(404).json({ message: "Not found" });
-
-    // ensure multi-tenant: only owner (or admin) can stream
-    if (!v.userId.equals(req.user._id) && req.user.role !== "admin") {
-      return res.status(403).json({ message: "Forbidden" });
-    }
-
-    const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, "../uploads");
-    const videoPath = path.join(UPLOAD_DIR, v.filename);
-    const stat = fs.statSync(videoPath);
-    const fileSize = stat.size;
-    const range = req.headers.range;
-    if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunkSize = (end - start) + 1;
-      const stream = fs.createReadStream(videoPath, { start, end });
-      res.writeHead(206, {
-        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-        "Accept-Ranges": "bytes",
-        "Content-Length": chunkSize,
-        "Content-Type": v.mimetype || "video/mp4"
-      });
-      stream.pipe(res);
-    } else {
-      res.writeHead(200, {
-        "Content-Length": fileSize,
-        "Content-Type": v.mimetype || "video/mp4"
-      });
-      fs.createReadStream(videoPath).pipe(res);
-    }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    file.pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': video.mimeType
+    });
+    fs.createReadStream(filePath).pipe(res);
   }
 };

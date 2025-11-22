@@ -1,75 +1,53 @@
-require("dotenv").config();
-const http = require("http");
-const mongoose = require("mongoose");
-const app = require("./app");
-const { Server } = require("socket.io");
-const jwt = require("jsonwebtoken");
-const User = require("./models/User");
+require('dotenv').config();
+const http = require('http');
+const express = require('express');
+const cors = require('cors');
+const connectDB = require('./config/db');
+const authRoutes = require('./routes/auth');
+const videosRoutes = require('./routes/videos');
+const tenantsRoutes = require('./routes/tenants');
+const userRoutes = require('./routes/users');
+const path = require('path');
 
-const PORT = process.env.PORT || 5000;
-const MONGO_URI = process.env.MONGO_URI;
-const JWT_SECRET = process.env.JWT_SECRET;
+const app = express();
+const server = http.createServer(app);
+const { Server } = require('socket.io');
+const io = new Server(server, {
+  cors: { origin: '*' }
+});
 
-(async function start() {
-  await mongoose.connect(MONGO_URI);
-  console.log("Mongo connected");
-
-  const server = http.createServer(app);
-
-  const io = new Server(server, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"]
-    }
+// basic socket auth / room join
+io.on('connection', (socket) => {
+  // clients should emit 'join' with userId after login
+  socket.on('join', (payload) => {
+    if (!payload || !payload.userId) return;
+    const room = `user:${payload.userId}`;
+    socket.join(room);
   });
+});
 
-  // expose io to express app for controllers
-  app.set("io", io);
+app.set('io', io);
 
-  // Socket auth & join logic
-  io.use(async (socket, next) => {
-    try {
-      const token = socket.handshake.auth?.token;
-      if (!token) return next(new Error("No token"));
-      const payload = jwt.verify(token, JWT_SECRET);
-      const user = await User.findById(payload.id);
-      if (!user) return next(new Error("Invalid token"));
-      socket.user = user;
-      // optional: save socketId to user
-      user.socketId = socket.id;
-      await user.save();
-      next();
-    } catch (err) {
-      next(new Error("Authentication error"));
-    }
+app.use(cors());
+app.use(express.json());
+
+// static files (video serving with stream route uses filesystem)
+app.use('/uploads', express.static(path.join(__dirname, '..', process.env.UPLOAD_DIR || 'uploads')));
+
+// routes
+app.use('/api/auth', authRoutes);
+app.use('/api/videos', videosRoutes);
+app.use('/api/tenants', tenantsRoutes);
+app.use('/api/users', userRoutes);
+
+// connect db and start
+const PORT = process.env.PORT || 4000;
+connectDB(process.env.MONGO_URI || 'mongodb://localhost:27017/pulse')
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error('DB connect error', err);
   });
-
-  io.on("connection", (socket) => {
-    console.log("Socket connected:", socket.id, "user:", socket.user.email);
-
-    // join user-room for user-level notifications
-    socket.join(`user_${socket.user._id}`);
-
-    // clients can subscribe to video rooms
-    socket.on("subscribeVideo", ({ videoId }) => {
-      socket.join(`video_${videoId}`);
-    });
-
-    socket.on("unsubscribeVideo", ({ videoId }) => {
-      socket.leave(`video_${videoId}`);
-    });
-
-    socket.on("disconnect", async () => {
-      try {
-        const u = await User.findById(socket.user._id);
-        if (u) {
-          u.socketId = null;
-          await u.save();
-        }
-      } catch (e) {}
-      console.log("Socket disconnected", socket.id);
-    });
-  });
-
-  server.listen(PORT, () => console.log("Server running on port", PORT));
-})();

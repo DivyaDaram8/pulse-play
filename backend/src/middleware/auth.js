@@ -1,18 +1,45 @@
-const jwt = require("jsonwebtoken");
-const User = require("../models/User");
-const { JWT_SECRET } = process.env;
+// src/middleware/auth.js
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 
-module.exports = async (req, res, next) => {
+const auth = async (req, res, next) => {
   try {
-    const auth = req.headers.authorization || "";
-    if (!auth.startsWith("Bearer ")) return res.status(401).json({ message: "No token" });
-    const token = auth.split(" ")[1];
-    const payload = jwt.verify(token, JWT_SECRET);
-    const user = await User.findById(payload.id).select("-password");
-    if (!user) return res.status(401).json({ message: "Invalid token" });
-    req.user = user;
-    next();
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ message: 'No token provided' });
+
+    // Expect "Bearer <token>"
+    const parts = authHeader.split(' ');
+    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+      return res.status(401).json({ message: 'Invalid Authorization header format' });
+    }
+    const token = parts[1];
+
+    const secret = process.env.JWT_SECRET || 'change_this_secret';
+    let payload;
+    try {
+      payload = jwt.verify(token, secret);
+    } catch (err) {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
+
+    if (!payload || !payload.id) {
+      return res.status(401).json({ message: 'Invalid token payload' });
+    }
+
+    const user = await User.findById(payload.id);
+    if (!user) return res.status(401).json({ message: 'User not found' });
+
+    // Attach a plain object copy to avoid unexpected Mongoose behavior elsewhere
+    req.user = typeof user.toObject === 'function' ? user.toObject() : user;
+
+    // Helpful debug log (uncomment while debugging)
+    // console.log('auth -> user loaded:', { id: req.user._id, role: req.user.role, tenantId: String(req.user.tenantId || '') });
+
+    return next();
   } catch (err) {
-    return res.status(401).json({ message: "Unauthorized", error: err.message });
+    console.error('auth middleware error:', err);
+    return res.status(500).json({ message: 'Server error in auth middleware' });
   }
 };
+
+module.exports = auth;
